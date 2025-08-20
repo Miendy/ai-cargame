@@ -18,6 +18,64 @@
     }
     button:hover { transform: scale(1.05); }
     @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    /* Powerup UI styles */
+    #powerupInventory {
+      position: absolute;
+      bottom: 30px;
+      right: 240px;
+      width: 80px;
+      height: 80px;
+      border-radius: 24px;
+      background: rgba(30,30,30,0.85);
+      border: 4px solid #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 120;
+      box-shadow: 0 0 16px #000a;
+      transition: background 0.3s;
+    }
+    #powerupInventory .powerupIcon {
+      width: 56px;
+      height: 56px;
+      border-radius: 16px;
+      background: #222;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 40px;
+      color: #fff;
+      border: 2px solid #fff;
+      box-shadow: 0 0 8px #0008;
+      transition: background 0.3s;
+    }
+    #powerupInventory .powerupIcon.empty {
+      background: #444;
+      color: #888;
+      border: 2px dashed #aaa;
+    }
+    #powerupTimer {
+      position: absolute;
+      bottom: 120px;
+      right: 250px;
+      color: #fff;
+      font-size: 20px;
+      font-weight: bold;
+      text-shadow: 1px 1px 4px #000;
+      z-index: 121;
+      pointer-events: none;
+      min-width: 80px;
+      text-align: center;
+    }
+    /* Lucky block style for minimap overlay */
+    .lucky-block-canvas {
+      position: absolute;
+      pointer-events: none;
+      z-index: 110;
+      left: 0; top: 0;
+      width: 100vw; height: 100vh;
+      pointer-events: none;
+    }
   </style>
 </head>
 
@@ -49,6 +107,19 @@ let car, aiCar, steeringWheel, handbrakeLever, cockpitFrame;
 let trackPoints, outerPoints, innerPoints, centerPoints, startPosition, startAngle;
 let trackCurvature, checkpoints = [];
 let speedLinesSystem;
+
+// Powerups system
+let luckyBlocks = [];
+let activePowerup = null;
+let powerupTimer = 0;
+let powerupTimerInterval = null;
+let powerupInventory = null;
+let powerupTimerDiv = null;
+let bombInventory = 0;
+let bombIconMesh = null;
+let fireEffectMeshes = [];
+let grassNegationActive = false;
+let grassNegationFlashPhase = 0;
 
 // Player state
 let speed = 0, maxSpeed = 2, acceleration = 0.01, deceleration = 0.03, turnSpeed = 0.03;
@@ -85,6 +156,13 @@ const handbrakeDriftFactor = 0.6, handbrakeDeceleration = 0.02;
 const tireMarks = [], maxTireMarks = 200;
 let tireMarkCounter = 0;
 const baseFOV = 80, minFOV = 76, fovSmoothness = 0.1;
+
+// Powerup types
+const POWERUP_TYPES = [
+  { type: "speedBoost", icon: "🔥", name: "Speed Boost" },
+  { type: "grassNegation", icon: "🌱", name: "Grass Negation" },
+  { type: "bomb", icon: "💣", name: "Bomb" }
+];
 
 // UI Creation
 function createUI() {
@@ -170,8 +248,20 @@ function createUI() {
   // Instructions
   const instructions = document.createElement('div');
   instructions.style.cssText = 'position: absolute; bottom: 20px; left: 20px; color: white; font-size: 16px; text-shadow: 1px 1px 2px rgba(0,0,0,0.8); z-index: 100;';
-  instructions.innerHTML = 'W/S: Accelerate/Brake | A/D: Turn | Q/E: Shift Gears | C: Camera View | Space: Handbrake';
+  instructions.innerHTML = 'W/S: Accelerate/Brake | A/D: Turn | Q/E: Shift Gears | C: Camera View | Space: Handbrake | F: Bomb';
   document.body.appendChild(instructions);
+
+  // Powerup inventory UI
+  powerupInventory = document.createElement('div');
+  powerupInventory.id = 'powerupInventory';
+  document.body.appendChild(powerupInventory);
+  updatePowerupInventoryUI();
+
+  // Powerup timer UI
+  powerupTimerDiv = document.createElement('div');
+  powerupTimerDiv.id = 'powerupTimer';
+  powerupTimerDiv.style.display = 'none';
+  document.body.appendChild(powerupTimerDiv);
 
   // Speedometer
   createSpeedometer();
@@ -180,6 +270,243 @@ function createUI() {
   createMinimap();
 }
 
+function updatePowerupInventoryUI() {
+  if (!powerupInventory) return;
+  powerupInventory.innerHTML = '';
+  // Show bomb if in inventory
+  if (bombInventory > 0) {
+    const bombDiv = document.createElement('div');
+    bombDiv.className = 'powerupIcon';
+    bombDiv.innerText = '💣';
+    bombDiv.title = 'Bomb (Press F to use)';
+    powerupInventory.appendChild(bombDiv);
+    if (bombInventory > 1) {
+      const countDiv = document.createElement('div');
+      countDiv.style.position = 'absolute';
+      countDiv.style.bottom = '8px';
+      countDiv.style.right = '16px';
+      countDiv.style.color = '#fff';
+      countDiv.style.fontSize = '20px';
+      countDiv.style.fontWeight = 'bold';
+      countDiv.style.textShadow = '1px 1px 4px #000';
+      countDiv.innerText = 'x' + bombInventory;
+      powerupInventory.appendChild(countDiv);
+    }
+  } else {
+    // Empty slot
+    const emptyDiv = document.createElement('div');
+    emptyDiv.className = 'powerupIcon empty';
+    emptyDiv.innerText = '?';
+    emptyDiv.title = 'No powerup';
+    powerupInventory.appendChild(emptyDiv);
+  }
+}
+
+// Powerup: Lucky Block system
+function spawnLuckyBlocks() {
+  // Remove old blocks
+  luckyBlocks.forEach(block => {
+    if (block.mesh) scene.remove(block.mesh);
+  });
+  luckyBlocks = [];
+  if (!trackPoints || trackPoints.length < 10) return;
+  // Spawn 3-5 blocks at random points on the track
+  const numBlocks = 3 + Math.floor(Math.random() * 3);
+  const usedIndices = new Set();
+  for (let i = 0; i < numBlocks; i++) {
+    let idx;
+    do {
+      idx = Math.floor(Math.random() * trackPoints.length);
+    } while (usedIndices.has(idx));
+    usedIndices.add(idx);
+    const p = trackPoints[idx];
+    // Create lucky block mesh
+    const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+    const blockMaterial = new THREE.MeshBasicMaterial({ color: 0xffe600 });
+    // Add question mark on all sides
+    const loader = new THREE.TextureLoader();
+    // We'll use a canvas for the question mark
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffe600';
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.font = 'bold 48px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#333';
+    ctx.fillText('?', 32, 36);
+    const texture = new THREE.CanvasTexture(canvas);
+    const materials = [];
+    for (let j = 0; j < 6; j++) {
+      materials.push(new THREE.MeshBasicMaterial({ map: texture }));
+    }
+    const mesh = new THREE.Mesh(blockGeometry, materials);
+    mesh.position.set(p.x, 0.7, p.z);
+    mesh.userData = { type: 'luckyBlock', idx: idx };
+    scene.add(mesh);
+    luckyBlocks.push({
+      mesh,
+      position: { x: p.x, z: p.z },
+      radius: 1.2,
+      type: 'luckyBlock',
+      idx
+    });
+  }
+}
+
+// Powerup: Fire effect for speed boost
+function showFireEffect() {
+  // Remove old fire meshes
+  fireEffectMeshes.forEach(m => scene.remove(m));
+  fireEffectMeshes = [];
+  // Add new fire mesh behind car
+  for (let i = 0; i < 2; i++) {
+    const fireGeometry = new THREE.ConeGeometry(0.18, 0.7, 12, 1, true);
+    const fireMaterial = new THREE.MeshBasicMaterial({ color: 0xff5500, transparent: true, opacity: 0.7 });
+    const fireMesh = new THREE.Mesh(fireGeometry, fireMaterial);
+    fireMesh.position.set(i === 0 ? -0.4 : 0.4, 0.18, -1.3);
+    fireMesh.rotation.x = Math.PI;
+    fireMesh.userData = { isFire: true };
+    car.add(fireMesh);
+    fireEffectMeshes.push(fireMesh);
+  }
+}
+function removeFireEffect() {
+  fireEffectMeshes.forEach(m => {
+    if (m.parent) m.parent.remove(m);
+  });
+  fireEffectMeshes = [];
+}
+
+// Powerup: Grass negation effect (car flashes green)
+function updateGrassNegationEffect(dt) {
+  if (!car) return;
+  if (!grassNegationActive) {
+    // Restore car color
+    car.children.forEach(child => {
+      if (child.material && child.material.color) {
+        if (child.material.userData && child.material.userData.originalColor) {
+          child.material.color.copy(child.material.userData.originalColor);
+        }
+      }
+    });
+    return;
+  }
+  grassNegationFlashPhase += dt * 0.005;
+  const flash = 0.5 + 0.5 * Math.sin(grassNegationFlashPhase * 6);
+  car.children.forEach(child => {
+    if (child.material && child.material.color) {
+      if (!child.material.userData) child.material.userData = {};
+      if (!child.material.userData.originalColor) {
+        child.material.userData.originalColor = child.material.color.clone();
+      }
+      // Interpolate between original and green
+      const orig = child.material.userData.originalColor;
+      child.material.color.r = orig.r * (1 - flash) + 0.2 * flash;
+      child.material.color.g = orig.g * (1 - flash) + 1.0 * flash;
+      child.material.color.b = orig.b * (1 - flash) + 0.2 * flash;
+    }
+  });
+}
+
+// Powerup: Bomb (inventory only for now)
+function giveBomb() {
+  bombInventory++;
+  updatePowerupInventoryUI();
+}
+
+// Powerup: Use bomb (on F)
+function useBomb() {
+  if (bombInventory > 0) {
+    bombInventory--;
+    updatePowerupInventoryUI();
+    // Spawn bomb mesh behind car
+    const bombGeometry = new THREE.SphereGeometry(0.25, 16, 16);
+    const bombMaterial = new THREE.MeshBasicMaterial({ color: 0x222222 });
+    const bombMesh = new THREE.Mesh(bombGeometry, bombMaterial);
+    bombMesh.position.copy(car.position.clone().add(new THREE.Vector3(-Math.sin(car.rotation.y), 0.2, -Math.cos(car.rotation.y)).multiplyScalar(1.5)));
+    scene.add(bombMesh);
+    // Add fuse
+    const fuseGeometry = new THREE.CylinderGeometry(0.03, 0.03, 0.18, 8);
+    const fuseMaterial = new THREE.MeshBasicMaterial({ color: 0xffd700 });
+    const fuse = new THREE.Mesh(fuseGeometry, fuseMaterial);
+    fuse.position.set(0, 0.28, 0);
+    bombMesh.add(fuse);
+    // Animate bomb (simple: fade out and remove after 3s)
+    let bombAge = 0;
+    function animateBomb() {
+      bombAge += 16.67;
+      if (bombAge > 3000) {
+        scene.remove(bombMesh);
+        if (bombMesh.geometry) bombMesh.geometry.dispose();
+        if (fuse.geometry) fuse.geometry.dispose();
+        return;
+      }
+      requestAnimationFrame(animateBomb);
+    }
+    animateBomb();
+  }
+}
+
+// Powerup: Activate
+function activatePowerup(type) {
+  if (activePowerup) return; // Only one at a time
+  if (type === "speedBoost") {
+    activePowerup = "speedBoost";
+    powerupTimer = 5.0;
+    showFireEffect();
+    showPowerupTimerUI("🔥 Speed Boost", powerupTimer);
+    // Remove after 5s
+    if (powerupTimerInterval) clearInterval(powerupTimerInterval);
+    powerupTimerInterval = setInterval(() => {
+      powerupTimer -= 0.1;
+      updatePowerupTimerUI();
+      if (powerupTimer <= 0) {
+        clearInterval(powerupTimerInterval);
+        removeFireEffect();
+        activePowerup = null;
+        hidePowerupTimerUI();
+      }
+    }, 100);
+  } else if (type === "grassNegation") {
+    activePowerup = "grassNegation";
+    powerupTimer = 5.0;
+    grassNegationActive = true;
+    showPowerupTimerUI("🌱 Grass Negation", powerupTimer);
+    if (powerupTimerInterval) clearInterval(powerupTimerInterval);
+    powerupTimerInterval = setInterval(() => {
+      powerupTimer -= 0.1;
+      updatePowerupTimerUI();
+      if (powerupTimer <= 0) {
+        clearInterval(powerupTimerInterval);
+        grassNegationActive = false;
+        activePowerup = null;
+        hidePowerupTimerUI();
+      }
+    }, 100);
+  } else if (type === "bomb") {
+    giveBomb();
+    // No timer for bomb
+  }
+}
+
+function showPowerupTimerUI(label, time) {
+  if (!powerupTimerDiv) return;
+  powerupTimerDiv.style.display = 'block';
+  powerupTimerDiv.innerHTML = `${label}<br><span id="powerupTimerValue">${time.toFixed(1)}s</span>`;
+}
+function updatePowerupTimerUI() {
+  if (!powerupTimerDiv) return;
+  const val = document.getElementById('powerupTimerValue');
+  if (val) val.textContent = `${Math.max(0, powerupTimer).toFixed(1)}s`;
+}
+function hidePowerupTimerUI() {
+  if (!powerupTimerDiv) return;
+  powerupTimerDiv.style.display = 'none';
+}
+
+// UI: Speedometer
 function createSpeedometer() {
   const speedometer = document.createElement('div');
   speedometer.style.cssText = 'position: absolute; bottom: 20px; right: 20px; width: 200px; height: 200px; border-radius: 50%; border: 5px solid #fff; background: rgba(0,0,0,0.8); overflow: hidden;';
@@ -240,7 +567,7 @@ function createGoKartTrack() {
   const scale = 3.0;
   function V(x, z) { return new THREE.Vector3(x * scale, 0, z * scale); }
   const controlPoints = [
-    V(0, 8), V(20, 12), V(15, 25), V(20, 45), V(45, 50), V(60, 45),
+    V(0, 8), V(20, 12), V(15, 25), V(20, 40), V(45, 50), V(60, 45),
     V(75, 35), V(80, 20), V(82, 18), V(78, 12), V(75, 5), V(60, 0),
     V(45, -5), V(30, -15), V(15, -20), V(0, -25), V(5, -30), V(-5, -35),
     V(-10, -25), V(-15, -20), V(-25, -10), V(-30, 5), V(-25, 20),
@@ -250,7 +577,7 @@ function createGoKartTrack() {
 
   const curve = new THREE.CatmullRomCurve3(controlPoints, true);
   const samples = 800;
-  const trackWidth = 8;
+  const trackWidth = 10;
   const halfWidth = trackWidth / 2;
 
   // Build track geometry
@@ -347,6 +674,9 @@ function createGoKartTrack() {
       progressPosition: u
     });
   });
+
+  // Spawn lucky blocks after track is created
+  setTimeout(spawnLuckyBlocks, 500);
 
   return {
     trackPoints, outerPoints, innerPoints, centerPoints, 
@@ -553,6 +883,30 @@ function checkCheckpointProgress() {
   allCheckpointsPassed = nextCheckpointIndex >= checkpoints.length;
 }
 
+// Powerup: Lucky block collision and pickup
+function checkLuckyBlockPickup() {
+  if (!luckyBlocks || !car) return;
+  for (let i = 0; i < luckyBlocks.length; i++) {
+    const block = luckyBlocks[i];
+    if (!block.mesh) continue;
+    const dx = car.position.x - block.position.x;
+    const dz = car.position.z - block.position.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    if (dist < 1.5) {
+      // Pick up block
+      scene.remove(block.mesh);
+      luckyBlocks.splice(i, 1);
+      // Randomly choose a powerup
+      const available = ["speedBoost", "grassNegation", "bomb"];
+      const type = available[Math.floor(Math.random() * available.length)];
+      activatePowerup(type);
+      // Respawn blocks after a delay
+      setTimeout(spawnLuckyBlocks, 4000);
+      break;
+    }
+  }
+}
+
 // Fixed lap counting system
 function checkLapCompletion() {
   const playerProgress = getPlayerProgress();
@@ -635,6 +989,11 @@ function setupEventHandlers() {
       e.preventDefault();
       handbrake = true;
     }
+
+    // Powerup: Use bomb
+    if (k === 'f') {
+      useBomb();
+    }
   });
 
   window.addEventListener('keyup', e => { 
@@ -659,13 +1018,32 @@ function startRace() {
   playerLapStartTime = performance.now();
   aiLapStartTime = performance.now();
   resetCheckpoints();
+
+  // Reset powerups
+  bombInventory = 0;
+  updatePowerupInventoryUI();
+  if (activePowerup) {
+    activePowerup = null;
+    grassNegationActive = false;
+    removeFireEffect();
+    hidePowerupTimerUI();
+    if (powerupTimerInterval) clearInterval(powerupTimerInterval);
+  }
+  // Respawn lucky blocks
+  setTimeout(spawnLuckyBlocks, 1000);
 }
 
 // Car physics and movement
 function updateCar() {
   const gearIndex = Math.min(Math.max(currentGear - 1, 0), maxGears - 1);
-  const currentMaxSpeed = maxSpeed * gearMaxSpeedMultipliers[gearIndex];
+  let currentMaxSpeed = maxSpeed * gearMaxSpeedMultipliers[gearIndex];
   let currentAcceleration = acceleration * gearAccelMultipliers[gearIndex];
+
+  // Powerup: Speed boost
+  if (activePowerup === "speedBoost") {
+    currentMaxSpeed = maxSpeed * 1.5;
+    currentAcceleration = acceleration * 2.2;
+  }
 
   const gearSpeedRatio = clamp(Math.abs(speed) / Math.max(0.0001, currentMaxSpeed), 0, 1);
   const gearTorquePenalty = (currentGear - 1) / (maxGears - 1);
@@ -678,7 +1056,11 @@ function updateCar() {
 
   // Acceleration/deceleration
   if ((keys['w'] || keys['arrowup']) && throttleAllowed) {
-    const recoveryBoost = (!onTrack) ? 0.4 : 1.0;
+    let recoveryBoost = (!onTrack) ? 0.4 : 1.0;
+    // Powerup: Grass negation
+    if (!onTrack && activePowerup === "grassNegation") {
+      recoveryBoost = 1.0;
+    }
     speed += currentAcceleration * recoveryBoost;
   } else if (keys['s'] || keys['arrowdown']) {
     speed -= currentAcceleration * 0.9;
@@ -700,17 +1082,20 @@ function updateCar() {
 
   // Off-track penalty
   if (!onTrack) {
-    const centerDist = distanceToTrackCenter(car.position.x, car.position.z);
-    const halfWidth = trackPoints && trackPoints[0] ? trackPoints[0].width / 2 : 6;
-    const tolerance = 1.0;
-    const over = Math.max(0, centerDist - halfWidth - tolerance);
-    if (over > 0) {
-      const overFactor = clamp(over / 5, 0, 1);
-      const speedRatioLocal = clamp(Math.abs(speed) / Math.max(0.0001, currentMaxSpeed), 0, 1);
-      const baseDrag = 0.006 * (0.3 + 0.7 * speedRatioLocal);
-      const extraDrag = baseDrag * overFactor;
-      if (speed > 0) speed = Math.max(0, speed - extraDrag);
-      if (speed < 0) speed = Math.min(0, speed + extraDrag);
+    // Powerup: Grass negation disables off-track penalty
+    if (!(activePowerup === "grassNegation")) {
+      const centerDist = distanceToTrackCenter(car.position.x, car.position.z);
+      const halfWidth = trackPoints && trackPoints[0] ? trackPoints[0].width / 2 : 6;
+      const tolerance = 1.0;
+      const over = Math.max(0, centerDist - halfWidth - tolerance);
+      if (over > 0) {
+        const overFactor = clamp(over / 5, 0, 1);
+        const speedRatioLocal = clamp(Math.abs(speed) / Math.max(0.0001, currentMaxSpeed), 0, 1);
+        const baseDrag = 0.006 * (0.3 + 0.7 * speedRatioLocal);
+        const extraDrag = baseDrag * overFactor;
+        if (speed > 0) speed = Math.max(0, speed - extraDrag);
+        if (speed < 0) speed = Math.min(0, speed + extraDrag);
+      }
     }
   }
 
@@ -783,7 +1168,13 @@ function updateCar() {
   // Check checkpoint progress and lap completion
   checkCheckpointProgress();
   checkLapCompletion();
-  
+
+  // Powerup: Lucky block pickup
+  checkLuckyBlockPickup();
+
+  // Powerup: Grass negation effect
+  updateGrassNegationEffect(16.67);
+
   // Update displays
   updateDisplays();
 }
@@ -1138,6 +1529,31 @@ function updateMinimap() {
     minimapCtx.arc(aiMapX, aiMapZ, 4, 0, Math.PI * 2);
     minimapCtx.fill();
   }
+
+  // Draw lucky blocks on minimap
+  if (luckyBlocks && luckyBlocks.length > 0) {
+    luckyBlocks.forEach(block => {
+      const mapX = 100 + (block.position.x * 0.8) - playerOffsetX;
+      const mapZ = 100 + (block.position.z * 0.8) - playerOffsetZ;
+      minimapCtx.save();
+      minimapCtx.beginPath();
+      minimapCtx.arc(mapX, mapZ, 7, 0, Math.PI * 2);
+      minimapCtx.fillStyle = '#ffe600';
+      minimapCtx.shadowColor = '#ff0';
+      minimapCtx.shadowBlur = 8;
+      minimapCtx.fill();
+      minimapCtx.shadowBlur = 0;
+      minimapCtx.strokeStyle = '#333';
+      minimapCtx.lineWidth = 2;
+      minimapCtx.stroke();
+      minimapCtx.fillStyle = '#333';
+      minimapCtx.font = 'bold 12px Arial';
+      minimapCtx.textAlign = 'center';
+      minimapCtx.textBaseline = 'middle';
+      minimapCtx.fillText('?', mapX, mapZ + 1);
+      minimapCtx.restore();
+    });
+  }
 }
 
 // Main animation loop
@@ -1319,6 +1735,13 @@ function init() {
   const loading = document.getElementById('loadingScreen');
   if (loading) loading.style.display = 'none';
   
+  // Spawn lucky blocks
+  setTimeout(spawnLuckyBlocks, 1000);
+
+  // Reset powerup UI
+  bombInventory = 0;
+  updatePowerupInventoryUI();
+
   console.log('Game initialized successfully');
 }
 
